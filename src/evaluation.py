@@ -4,8 +4,6 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
 
-from .config import PROCESSED_DIR
-
 
 def calculate_summary_stats(df: pd.DataFrame) -> Dict:
     """Calculate overall summary statistics."""
@@ -37,9 +35,9 @@ def identify_bottlenecks(df: pd.DataFrame, top_n: int = 10) -> Dict:
         "trip_id": "count",
     }).reset_index()
     
-    worst_drivers = driver_perf.nsmallest(top_n, "efficiency_index")[
+    driver = driver_perf.nsmallest(top_n, "efficiency_index")[
         ["driver_id", "efficiency_index", "is_late_pickup"]
-    ].to_dict("records")
+    ]
     
     # Worst hours
     hourly_perf = active.groupby("scheduled_hour").agg({
@@ -47,9 +45,9 @@ def identify_bottlenecks(df: pd.DataFrame, top_n: int = 10) -> Dict:
         "trip_id": "count",
     }).reset_index()
     
-    worst_hours = hourly_perf.nlargest(3, "is_late_pickup")[
+    hour = hourly_perf.nlargest(3, "is_late_pickup")[
         ["scheduled_hour", "is_late_pickup"]
-    ].to_dict("records")
+    ]
     
     # Worst regions
     region_perf = active.groupby("region").agg({
@@ -57,9 +55,12 @@ def identify_bottlenecks(df: pd.DataFrame, top_n: int = 10) -> Dict:
         "is_late_pickup": "mean",
     }).reset_index()
     
-    worst_regions = region_perf.nsmallest(3, "efficiency_index")[
-        ["region", "efficiency_index", "is_late_pickup"]
-    ].to_dict("records")
+    # Add late_pickup_rate for notebook compatibility
+    region_perf = region_perf.rename(columns={"is_late_pickup": "late_pickup_rate"})
+    
+    region = region_perf.nsmallest(3, "efficiency_index")[
+        ["region", "efficiency_index", "late_pickup_rate"]
+    ]
     
     # Worst trip types
     trip_type_perf = active.groupby("trip_type").agg({
@@ -67,15 +68,15 @@ def identify_bottlenecks(df: pd.DataFrame, top_n: int = 10) -> Dict:
         "trip_id": "count",
     }).reset_index()
     
-    worst_trip_types = trip_type_perf.nlargest(3, "is_late_pickup")[
+    trip_type = trip_type_perf.nlargest(3, "is_late_pickup")[
         ["trip_type", "is_late_pickup"]
-    ].to_dict("records")
+    ]
     
     return {
-        "worst_drivers": worst_drivers,
-        "worst_hours": worst_hours,
-        "worst_regions": worst_regions,
-        "worst_trip_types": worst_trip_types,
+        "driver": driver,
+        "hour": hour,
+        "region": region,
+        "trip_type": trip_type,
     }
 
 
@@ -121,6 +122,8 @@ def calculate_improvement_potential(df: pd.DataFrame) -> Dict:
 
 def generate_evaluation_report(df: pd.DataFrame) -> str:
     """Generate a text-based evaluation report."""
+    from .config import PROCESSED_DIR
+    
     stats = calculate_summary_stats(df)
     bottlenecks = identify_bottlenecks(df)
     improvements = calculate_improvement_potential(df)
@@ -142,12 +145,12 @@ def generate_evaluation_report(df: pd.DataFrame) -> str:
     report.append("-" * 40)
     
     report.append("Worst Hours (by late rate):")
-    for h in bottlenecks["worst_hours"]:
-        report.append(f"  Hour {h['scheduled_hour']:02d}:00 - {h['is_late_pickup']*100:.1f}% late")
+    for _, row in bottlenecks["hour"].iterrows():
+        report.append(f"  Hour {int(row['scheduled_hour']):02d}:00 - {row['is_late_pickup']*100:.1f}% late")
     
     report.append("Worst Regions (by efficiency):")
-    for r in bottlenecks["worst_regions"]:
-        report.append(f"  {r['region']} - Efficiency: {r['efficiency_index']:.1f}")
+    for _, row in bottlenecks["region"].iterrows():
+        report.append(f"  {row['region']} - Efficiency: {row['efficiency_index']:.1f}")
     
     report.append("\n📈 IMPROVEMENT POTENTIAL")
     report.append("-" * 40)
@@ -164,6 +167,7 @@ def generate_evaluation_report(df: pd.DataFrame) -> str:
 
 
 if __name__ == "__main__":
+    from .config import PROCESSED_DIR
     # Load scored data
     df = pd.read_csv(PROCESSED_DIR / "trips_scored.csv")
     

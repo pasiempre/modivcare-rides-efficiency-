@@ -2,7 +2,7 @@
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Callable, Optional
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -171,46 +171,104 @@ def assign_capacity_aware(
 def simulate_strategy(
     trips: pd.DataFrame,
     assignments: pd.DataFrame,
+    initial_locations: Dict[str, Tuple[float, float]],
+    driver_capacities: Dict[str, int],
+    avg_speed_mph: float = 25.0,
     add_noise: bool = True
 ) -> SimulationResult:
     """
     Simulate trip execution based on assignments and calculate metrics.
+    
+    This simulation accounts for:
+    - Deadhead travel between trips
+    - Actual arrival times based on travel dynamics
+    - Strategy-dependent delays and idle times
     """
     set_seed(RANDOM_SEED)
     
     merged = trips.merge(assignments, on="trip_id")
-    
-    # Filter to non-cancelled
     active = merged[~merged["is_cancelled"]].copy()
     
-    # Calculate simulated metrics with optional noise
-    if add_noise:
-        # Add some random variation to simulate real-world variance
-        noise = np.random.normal(1.0, 0.1, len(active))
-        simulated_delay = active["pickup_delay_minutes"].fillna(0) * noise
-    else:
-        simulated_delay = active["pickup_delay_minutes"].fillna(0)
+    strategy_name = assignments["strategy"].iloc[0]
     
-    on_time = (simulated_delay <= 10).mean()
-    total_miles = active["distance_miles"].sum()
-    avg_duration = active["trip_duration_minutes"].mean()
+    total_miles = 0.0
+    total_idle_minutes = 0.0
+    all_delays = []
+    all_utilizations = []
+    total_duration = 0.0
     
-    # Calculate idle time (simplified)
-    avg_idle = 15  # Placeholder - would need more complex calculation
-    
-    # Calculate capacity utilization if not present
-    if "capacity_utilization" not in active.columns:
-        active["capacity_utilization"] = active["num_passengers"] / active["vehicle_capacity"]
-    
-    # Utilization
-    utilization = active["capacity_utilization"].mean()
+    # Process each driver's day
+    for driver, driver_trips in active.groupby("assigned_driver"):
+        # Sort by scheduled pickup
+        driver_trips = driver_trips.sort_values("scheduled_pickup_time")
+        
+        current_loc = initial_locations[driver]
+        # Start time is 1 hour before first trip or 6 AM (whichever is later)
+        first_trip_time = driver_trips["scheduled_pickup_time"].iloc[0]
+        current_time = max(first_trip_time - timedelta(hours=1), first_trip_time.replace(hour=6, minute=0, second=0, microsecond=0))
+        
+        driver_capacity = driver_capacities[driver]
+        
+        for _, trip in driver_trips.iterrows():
+            pickup_loc = (trip["pickup_lat"], trip["pickup_lng"])
+            dropoff_loc = (trip["dropoff_lat"], trip["dropoff_lng"])
+
+            # BUG FIX: Reset driver start time at day boundaries
+            # Prevents overnight gaps from being counted as idle time
+            trip_date = trip["scheduled_pickup_time"].date()
+            if current_time.date() < trip_date:
+                # New day: reset to 1 hour before trip or 6 AM (whichever is later)
+                current_time = max(
+                    trip["scheduled_pickup_time"] - timedelta(hours=1),
+                    trip["scheduled_pickup_time"].replace(hour=6, minute=0, second=0, microsecond=0)
+                )
+
+            # 1. Deadhead travel
+            deadhead_miles = haversine_distance(current_loc[0], current_loc[1], pickup_loc[0], pickup_loc[1])
+            deadhead_time_mins = (deadhead_miles / avg_speed_mph) * 60
+            
+            if add_noise:
+                deadhead_time_mins *= np.random.normal(1.0, 0.1)
+            
+            arrival_at_pickup = current_time + timedelta(minutes=deadhead_time_mins)
+            
+            # 2. Pickup timing
+            # Driver can't pick up before scheduled time unless they arrived early
+            # but if they arrive early, they wait (idle)
+            actual_pickup_time = max(arrival_at_pickup, trip["scheduled_pickup_time"])
+            
+            idle_mins = (actual_pickup_time - arrival_at_pickup).total_seconds() / 60
+            delay_mins = (actual_pickup_time - trip["scheduled_pickup_time"]).total_seconds() / 60
+            
+            # 3. Trip execution
+            trip_duration = trip["trip_duration_minutes"]
+            if add_noise:
+                trip_duration *= np.random.normal(1.0, 0.05)
+            
+            actual_dropoff_time = actual_pickup_time + timedelta(minutes=trip_duration)
+            
+            # 4. Update metrics
+            total_miles += deadhead_miles + trip["distance_miles"]
+            total_idle_minutes += idle_mins
+            total_duration += trip_duration
+            all_delays.append(delay_mins)
+            all_utilizations.append(trip["num_passengers"] / driver_capacity)
+            
+            # 5. Update state
+            current_loc = dropoff_loc
+            current_time = actual_dropoff_time
+
+    # Aggregate Results
+    on_time_rate = np.mean([1 if d <= 10 else 0 for d in all_delays]) if all_delays else 0
+    avg_idle = total_idle_minutes / len(active) if len(active) > 0 else 0
+    utilization = np.mean(all_utilizations) if all_utilizations else 0
     
     return SimulationResult(
-        strategy_name=assignments["strategy"].iloc[0],
+        strategy_name=strategy_name,
         total_trips=len(active),
-        on_time_rate=on_time,
+        on_time_rate=on_time_rate,
         total_miles=total_miles,
-        avg_trip_duration=avg_duration,
+        avg_trip_duration=total_duration / len(active) if len(active) > 0 else 0,
         avg_idle_time=avg_idle,
         utilization_rate=utilization,
     )
@@ -222,20 +280,22 @@ def run_simulation_comparison(
     seed: int = RANDOM_SEED
 ) -> pd.DataFrame:
     """
-    Run all routing strategies and compare results.
-    
-    Note: This is a conceptual comparison using historical durations/delays
-    with light stochastic variation, not a full vehicle routing optimization model.
-    Strategy differences reflect assignment logic, not recalculated travel dynamics.
+    Run all routing strategies and compare results with dynamic simulation.
     """
     # Seed for reproducibility
     set_seed(seed)
+    
+    # Ensure time columns are datetimes
+    trips = trips.copy()
+    for col in ["requested_pickup_time", "scheduled_pickup_time", "actual_pickup_time", "actual_dropoff_time"]:
+        if col in trips.columns:
+            trips[col] = pd.to_datetime(trips[col])
     
     # Setup
     drivers = [f"DRV_{i:04d}" for i in range(num_drivers)]
     
     # Initialize driver locations randomly (now deterministic with seed)
-    driver_locations = {
+    initial_locations = {
         d: (
             np.random.uniform(33.2, 33.7),
             np.random.uniform(-112.3, -111.8)
@@ -254,17 +314,18 @@ def run_simulation_comparison(
     # Run each strategy
     print("Running FCFS strategy...")
     fcfs_assignments = assign_fcfs(trips, drivers)
-    fcfs_result = simulate_strategy(trips, fcfs_assignments)
+    fcfs_result = simulate_strategy(trips, fcfs_assignments, initial_locations, driver_capacities)
     results.append(fcfs_result.to_dict())
     
     print("Running Nearest-Driver strategy...")
-    nearest_assignments = assign_nearest(trips, drivers, driver_locations.copy())
-    nearest_result = simulate_strategy(trips, nearest_assignments)
+    # nearest_assignments updates locations, so we pass a copy
+    nearest_assignments = assign_nearest(trips, drivers, initial_locations.copy())
+    nearest_result = simulate_strategy(trips, nearest_assignments, initial_locations, driver_capacities)
     results.append(nearest_result.to_dict())
     
     print("Running Capacity-Aware strategy...")
     capacity_assignments = assign_capacity_aware(trips, drivers, driver_capacities)
-    capacity_result = simulate_strategy(trips, capacity_assignments)
+    capacity_result = simulate_strategy(trips, capacity_assignments, initial_locations, driver_capacities)
     results.append(capacity_result.to_dict())
     
     return pd.DataFrame(results)
@@ -279,9 +340,17 @@ def save_simulation_results(results: pd.DataFrame) -> None:
 
 
 if __name__ == "__main__":
-    # Load scored trips
+    # Load scored trips or cleaned trips if scored doesn't exist
+    scored_path = PROCESSED_DIR / "trips_scored.csv"
+    if not scored_path.exists():
+        scored_path = PROCESSED_DIR / "trips_with_efficiency.csv"
+        
+    if not scored_path.exists():
+        print(f"Error: Could not find trip data in {PROCESSED_DIR}")
+        exit(1)
+        
     trips = pd.read_csv(
-        PROCESSED_DIR / "trips_scored.csv",
+        scored_path,
         parse_dates=[
             "requested_pickup_time",
             "scheduled_pickup_time",
@@ -290,7 +359,7 @@ if __name__ == "__main__":
         ]
     )
     
-    print("Running routing simulation comparison...")
+    print(f"Running routing simulation comparison using {scored_path.name}...")
     results = run_simulation_comparison(trips)
     print("\nResults:")
     print(results.to_string(index=False))

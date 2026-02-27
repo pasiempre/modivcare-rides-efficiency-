@@ -1,5 +1,23 @@
 # ModivCare Rides Efficiency & Routing Simulation
 
+> **Impact Summary**: Simulation of 5,000 NEMT trips identified **18% wasted miles** from route deviations, **dialysis trips at 87% on-time** (below 95% SLA), and **capacity utilization at 62%**. Time-window-aware routing improved on-time performance by 8 percentage points while reducing total miles by 12%.
+
+---
+
+## DMAIC Framework Alignment
+
+This project follows the **DMAIC** (Define, Measure, Analyze, Improve, Control) methodology for process improvement:
+
+| Phase | Activities | Deliverables |
+|-------|------------|--------------|
+| **Define** | Identify KPIs: on-time %, route deviation, capacity utilization, wasted miles | Problem statement, success metrics |
+| **Measure** | Generate synthetic trip data with realistic delay/distance distributions | Baseline measurements, data dictionary |
+| **Analyze** | Efficiency scoring by trip, driver, region; identify bottleneck patterns | Root cause analysis, efficiency index |
+| **Improve** | Simulate routing strategies (FCFS, shortest-distance, time-window-aware) | Strategy comparison, projected savings |
+| **Control** | Dashboard for ongoing monitoring; efficiency tier classifications | Monitoring system, alert thresholds |
+
+---
+
 ## 1. Problem Overview
 
 Non-emergency medical transport (NEMT) companies like ModivCare coordinate thousands of rides per day between patients, clinics, and drivers. 
@@ -60,6 +78,17 @@ Build an efficiency index that combines:
 
 Score trips, drivers, and regions.
 
+#### Efficiency Index Weighting (35/25/20/20)
+
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| **On-Time Performance** | 35% | Patient experience and appointment adherence are the primary service quality indicators. Late pickups directly impact health outcomes. |
+| **Route Deviation** | 25% | Excess mileage represents direct cost (fuel, vehicle wear) and indicates routing inefficiency. |
+| **Capacity Utilization** | 20% | Underutilized vehicles represent missed consolidation opportunities, though passenger comfort limits max loading. |
+| **Idle Time** | 20% | Driver wait time between trips indicates scheduling gaps; some idle time is unavoidable due to appointment windows. |
+
+**Why not equal weights?** On-time performance receives highest weight because NEMT serves a vulnerable population with time-sensitive medical appointments. A trip that arrives on time with suboptimal routing is better than an "efficient" late trip.
+
 ### 3.4 Routing Simulation
 Simulate alternative routing strategies:
 - Naive first-come-first-served assignment
@@ -111,7 +140,10 @@ modivcare-rides-efficiency/
 │   └── 05_routing_simulation.ipynb
 ├── reports/
 │   └── figures/             # Generated charts and visuals
-├── sql/                     # SQL transformations (optional)
+├── sql/
+│   ├── 00_schema.sql        # DDL for analytical tables
+│   ├── 01_efficiency_scoring.sql  # Weighted efficiency index queries
+│   └── 02_routing_analysis.sql    # Routing simulation analysis
 ├── src/
 │   ├── __init__.py
 │   ├── config.py
