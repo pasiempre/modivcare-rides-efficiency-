@@ -171,8 +171,8 @@ def assign_capacity_aware(
 def simulate_strategy(
     trips: pd.DataFrame,
     assignments: pd.DataFrame,
-    initial_locations: Dict[str, Tuple[float, float]],
-    driver_capacities: Dict[str, int],
+    initial_locations: Dict[str, Tuple[float, float]] | None = None,
+    driver_capacities: Dict[str, int] | None = None,
     avg_speed_mph: float = 25.0,
     add_noise: bool = True
 ) -> SimulationResult:
@@ -190,6 +190,26 @@ def simulate_strategy(
     active = merged[~merged["is_cancelled"]].copy()
     
     strategy_name = assignments["strategy"].iloc[0]
+
+    # Backward-compatible defaults so the function can be called with only
+    # (trips, assignments), as done in unit tests and simple notebook demos.
+    assigned_drivers = sorted(active["assigned_driver"].dropna().unique().tolist())
+
+    if initial_locations is None:
+        initial_locations = {}
+        for driver in assigned_drivers:
+            driver_rows = active[active["assigned_driver"] == driver]
+            if not driver_rows.empty:
+                first_row = driver_rows.sort_values("scheduled_pickup_time").iloc[0]
+                initial_locations[driver] = (first_row["pickup_lat"], first_row["pickup_lng"])
+
+    if driver_capacities is None:
+        inferred_capacity = 4
+        if "vehicle_capacity" in active.columns:
+            valid_caps = active["vehicle_capacity"].dropna()
+            if not valid_caps.empty:
+                inferred_capacity = int(valid_caps.mode().iloc[0])
+        driver_capacities = {driver: inferred_capacity for driver in assigned_drivers}
     
     total_miles = 0.0
     total_idle_minutes = 0.0
@@ -213,8 +233,8 @@ def simulate_strategy(
             pickup_loc = (trip["pickup_lat"], trip["pickup_lng"])
             dropoff_loc = (trip["dropoff_lat"], trip["dropoff_lng"])
 
-            # BUG FIX: Reset driver start time at day boundaries
-            # Prevents overnight gaps from being counted as idle time
+            # Reset driver start time at day boundaries so overnight gaps
+            # are not counted as in-shift idle time.
             trip_date = trip["scheduled_pickup_time"].date()
             if current_time.date() < trip_date:
                 # New day: reset to 1 hour before trip or 6 AM (whichever is later)
